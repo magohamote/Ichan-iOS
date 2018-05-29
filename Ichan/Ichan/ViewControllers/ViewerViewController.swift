@@ -41,6 +41,10 @@ class ViewerViewController: UIViewController {
     private var roomCode = ""
     private var message = ""
     private var resolvedAnchors = 0
+    
+    private var hostingAnchorCount = 0
+    private var resolvingAnchorCount = 0
+    
     private var lastRoomNumber: Int = 0 {
         didSet {
             //TODO
@@ -76,9 +80,10 @@ class ViewerViewController: UIViewController {
     }
     
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if touches.count < 1 || state == .hosting || state == .creatingRoom || state == .resolving {
+        if touches.count < 1 || state == .creatingRoom || state == .resolving {
             return
         }
+        hostingAnchorCount += 1
         let touch = Array(touches).first
         let touchLocation: CGPoint? = touch?.location(in: sceneView)
         let hitTestResults = sceneView.hitTest(touchLocation ?? CGPoint.zero, types: [.existingPlane, .existingPlaneUsingExtent, .estimatedHorizontalPlane])
@@ -106,12 +111,13 @@ class ViewerViewController: UIViewController {
                         let anchorsIdHashtable = value["hosted_anchors"] as? [AnyHashable: String] {
                         for (_, anchorsId) in anchorsIdHashtable {
                             anchorIdsArray.append(anchorsId)
+                            self.resolvingAnchorCount += 1
+                            self.enter(.resolving)
                         }
                     }
                 }
                 if anchorIdsArray.count > 0 {
                     for anchorId in anchorIdsArray {
-
                         strongSelf?.resolveAnchor(withIdentifier: anchorId)
                     }
                     strongSelf?.firebaseReference?.child("hotspot_list").child(roomCode).removeAllObservers()
@@ -269,7 +275,11 @@ class ViewerViewController: UIViewController {
             toggle(resolveButton, enabled: false, title: "RESOLVE")
             
         case .hosting:
-            message = "Hosting anchor..."
+            if hostingAnchorCount > 1 {
+                message = "Hosting \(hostingAnchorCount) anchors..."
+            } else {
+                message = "Hosting \(hostingAnchorCount) anchor..."
+            }
             
         case .hostingFinished:
             guard let garAnchor = self.garAnchor, let cloudState = cloudStateString(garAnchor.cloudState) else { return }
@@ -281,7 +291,14 @@ class ViewerViewController: UIViewController {
         case .resolving:
             dismiss(animated: false, completion: {() -> Void in
             })
-            message = "Resolving anchor..."
+            if resolvingAnchorCount == 0 {
+                message = "Getting anchors to resolve..."
+            } else if resolvingAnchorCount > 1 {
+                message = "Resolving \(resolvingAnchorCount) anchors..."
+            } else {
+                message = "Resolving \(resolvingAnchorCount) anchor..."
+            }
+            
             toggle(hostButton, enabled: false, title: "HOST")
             toggle(resolveButton, enabled: true, title: "CANCEL")
             
@@ -298,12 +315,21 @@ class ViewerViewController: UIViewController {
 
 extension ViewerViewController: GARSessionDelegate {
     func session(_ session: GARSession, didHostAnchor anchor: GARAnchor) {
-        if state != .hosting || !(anchor == garAnchor) {
+        
+        if state != .hosting {
             return
         }
+        
+        hostingAnchorCount -= 1
+        
+        if hostingAnchorCount == 0 {
+            enter(.hostingFinished)
+        } else {
+            enter(.hosting)
+        }
+        
         garAnchor = anchor
-        enter(.hostingFinished)
-        firebaseReference?.child("hotspot_list").child(roomCode).child("hosted_anchors").child("id_\(arAnchorsArray.count)").setValue(anchor.cloudIdentifier)
+        firebaseReference?.child("hotspot_list").child(roomCode).child("hosted_anchors").child("id_\(arAnchorsArray.count - hostingAnchorCount)").setValue(anchor.cloudIdentifier)
         let timestampInteger = Int64(Date().timeIntervalSince1970 * 1000)
         let timestamp = timestampInteger
         firebaseReference?.child("hotspot_list").child(roomCode).child("updated_at_timestamp").setValue(timestamp)
@@ -319,17 +345,22 @@ extension ViewerViewController: GARSessionDelegate {
     
     func session(_ session: GARSession, didResolve anchor: GARAnchor) {
         if (state != .resolving && resolvedAnchors > arAnchorsArray.count) /*|| !(anchor == garAnchor)*/ {
-            print("did return")
             return
         }
-        print("did resolve")
+        resolvingAnchorCount -= 1
+        
         garAnchor = anchor
         
         let newArAnchor = ARAnchor(transform: anchor.transform)
         arAnchorsArray.append(newArAnchor)
         sceneView.session.add(anchor: newArAnchor)
-        enter(.resolvingFinished)
         resolvedAnchors += 1
+        
+        if resolvingAnchorCount == 0 {
+            enter(.resolvingFinished)
+        } else {
+            enter(.resolving)
+        }
     }
     
     func session(_ session: GARSession, didFailToResolve anchor: GARAnchor) {
